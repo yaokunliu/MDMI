@@ -72,6 +72,7 @@ class MAGNALayer(nn.Module):
 
         return rst  # (n_cates, dim)   
 
+
     ######近似注意力扩散的特征聚合######
     def ppr_estimation(self, features):
         feat_0 = self.feat_drop(features)

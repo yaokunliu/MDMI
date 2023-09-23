@@ -8,7 +8,7 @@ from data_loader import ReadData
 
 class GraphSampler(object):
     def __init__(self, path='data/dataset/'):
-        self.device = torch.device('cuda:1' if torch.cuda.is_available() else "cpu")
+        self.device = torch.device('cuda:0' if torch.cuda.is_available() else "cpu")
 
         print(f'loading [{path}]')
         self.path = path
@@ -42,8 +42,8 @@ class GraphSampler(object):
         # print(f"Sparsity : {(self.n_train + self.n_test + self.n_valid) / self.n_users / self.n_cates}")  # 0.015384037562358021
         '''
         self.Graph = None
-        self.n_cates = 499 # 1442 # 1297 # 1697 # 
-        self.n_items = 293446 # 311746 # 10176 # 42286 # 
+        self.n_cates = 499 # 1297 # 497 # 1442 # 1697 # 
+        self.n_items = 293446 # 10176 # 23880 # 311746 # 42286 # 
 
     def _convert_sp_mat_to_sp_tensor(self, X):
         coo = X.tocoo().astype(np.float32)
@@ -72,10 +72,8 @@ class GraphSampler(object):
                     for i in range(len(seq) - 1): 
                         if adj_mat[seq[i][1] - 1, seq[i + 1][1] - 1] == 0:  # 边的初始值为0
                             adj_mat[seq[i][1] - 1, seq[i + 1][1] - 1] = 1
-                            adj_mat[seq[i + 1][1] - 1, seq[i][1] - 1] = 1
                         else:
-                            adj_mat[seq[i][1] - 1, seq[i + 1][1] - 1] += 1  # 边的出现次数（频率）+ 1
-                            adj_mat[seq[i + 1][1] - 1, seq[i][1] - 1] += 1         
+                            adj_mat[seq[i][1] - 1, seq[i + 1][1] - 1] += 1  # 边的出现次数（频率）+ 1       
                
                 for i in range(self.n_cates):
                     adj_mat[i, i] = 0  
@@ -103,6 +101,7 @@ class GraphSampler(object):
             print(self.Graph.shape)  
 
         return self.Graph
+
 
 if __name__ == '__main__':
     dataset = GraphSampler()

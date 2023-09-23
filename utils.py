@@ -2,53 +2,66 @@ import os
 import torch
 import random
 import shutil
+import itertools
 import numpy as np
 import torch.nn as nn
-import torch.nn.functional as F
 
 
-def batch_norm(X, X_cate, gamma, beta, moving_mean, moving_var, eps, momentum):
-    cate_mean = X_cate.mean(dim=2, keepdim=True)
-    cate_std = X_cate.std(dim=2, keepdim=True)
-    # 通过is_grad_enabled来判断当前模式是训练模式还是预测模式
-    if not torch.is_grad_enabled():
-        # 如果是在预测模式下，直接使用传入的移动平均所得的均值和方差
-        X_hat = cate_std * (X - moving_mean) / torch.sqrt(moving_var + eps) + cate_mean
-    else:
-        mean = X.mean(dim=1, keepdim=True)
-        var = ((X - mean) ** 2).mean(dim=1, keepdim=True)
-        # 训练模式下，用当前的均值和方差做标准化
-        X_hat = cate_std * (X - mean) / torch.sqrt(var + eps) + cate_mean
-        # 更新移动平均的均值和方差
-        moving_mean = momentum * moving_mean + (1.0 - momentum) * mean
-        moving_var = momentum * moving_var + (1.0 - momentum) * var
-    
-    Y = gamma * X_hat + beta  # 缩放和移位
-
-    return Y, moving_mean.data, moving_var.data
-
-
-class BatchNorm(nn.Module):
-    def __init__(self, num_features):
-        super().__init__()
-        # 参与求梯度和迭代的拉伸和偏移参数，分别初始化成1和0
-        self.gamma = nn.Parameter(torch.ones((1, 1, num_features)))
-        self.beta = nn.Parameter(torch.zeros((1, 1, num_features)))
-        # 非模型参数的变量初始化为0和1
-        self.moving_mean = torch.zeros((1, 1, num_features))
-        self.moving_var = torch.ones((1, 1, num_features))
-
-    def forward(self, X, X_cate):
-        # 如果X不在内存上，将moving_mean和moving_var复制到X所在显存上
-        if self.moving_mean.device != X.device:
-            self.moving_mean = self.moving_mean.to(X.device)
-            self.moving_var = self.moving_var.to(X.device)
-        # 保存更新过的moving_mean和moving_var
-        Y, self.moving_mean, self.moving_var = batch_norm(
-            X, X_cate, self.gamma, self.beta, self.moving_mean,
-            self.moving_var, eps=1e-5, momentum=0.9)
+class SENETLayer(nn.Module):
+    def __init__(self, filed_size, reduction_ratio=8):
+        super(SENETLayer, self).__init__()
+        self.reduction_size = max(1, filed_size // reduction_ratio)
+        self.excitation = nn.Sequential(
+            nn.Linear(filed_size, self.reduction_size, bias=False),
+            nn.ReLU(),
+            nn.Linear(self.reduction_size, filed_size, bias=False),
+            nn.ReLU()
+        )
         
-        return Y
+    def forward(self, inputs):
+        Z = torch.mean(inputs, dim=-1, out=None)  # [b, n]
+        A = self.excitation(Z)  # [b, n]
+        V = torch.mul(inputs, torch.unsqueeze(A, dim=2))  # [b, n, d] 
+
+        return V
+
+
+class BilinearInteraction(nn.Module):
+    def __init__(self, filed_size, embedding_size, bilinear_type='each'):
+        super(BilinearInteraction, self).__init__()
+        self.bilinear_type = bilinear_type
+        self.bilinear = nn.ModuleList()
+
+        if self.bilinear_type == 'all':  # 所有embedding矩阵共用一个矩阵W
+            self.bilinear = nn.Linear(embedding_size, embedding_size, bias=False)
+
+        elif self.bilinear_type == 'each':
+            for _ in range(filed_size):  # 每个field共用一个矩阵W
+                self.bilinear.append(nn.Linear(embedding_size, embedding_size, bias=False))
+
+        elif self.bilinear_type == 'interaction':  # 每个交互用一个矩阵W
+            for _, _ in itertools.product(range(filed_size), range(filed_size)):
+                self.bilinear.append(nn.Linear(embedding_size, embedding_size, bias=False))
+
+    def forward(self, inputs_A, inputs_B):
+        inputs_A = torch.split(inputs_A, 1, dim=1)
+        inputs_B = torch.split(inputs_B, 1, dim=1)
+
+        if self.bilinear_type == 'all':  # 所有embedding矩阵共用一个矩阵W
+            p = [torch.mul(self.bilinear(v_i), v_j)
+                 for v_i, v_j in itertools.product(inputs_A, inputs_B)]
+
+        elif self.bilinear_type == 'each':  # 每个field共用一个矩阵W
+            p = [torch.mul(self.bilinear[i](inputs_A[i]), inputs_B[j])
+                 for i, j in itertools.product(range(len(inputs_A)), range(len(inputs_B)))]
+            # p = [torch.mul(inputs_A[i], inputs_B[j])
+            #      for i, j in itertools.product(range(len(inputs_A)), range(len(inputs_B)))]
+
+        elif self.bilinear_type == 'interaction':  # 每个交互用一个矩阵W
+            p = [torch.mul(bilinear(v[0]), v[1])
+                 for v, bilinear in zip(itertools.product(inputs_A, inputs_B), self.bilinear)]
+
+        return torch.cat(p, dim=1)
 
 
 def setup_seed(seed):  # 保证每次运行网络的时候相同输入的输出是固定的
@@ -61,10 +74,9 @@ def setup_seed(seed):  # 保证每次运行网络的时候相同输入的输出�
 
 
 # 生成实验名称
-def get_exp_name(dataset, batch_size, lr, hidden_size, seq_len, group_num, 
-                 num_layers, alpha, hop_num, dropout, save=True):
+def get_exp_name(dataset, batch_size, lr, hidden_size, seq_len, group_num, num_layers, alpha, L_time, hop_num, dropout, save=True):
     para_name = '_'.join([dataset, 'b' + str(batch_size), 'lr' + str(lr), 'd' + str(hidden_size), 'len' + str(seq_len), 
-                          'g' + str(group_num), 'L' + str(num_layers), 'a' + str(alpha), 'h' + str(hop_num), 'dp' + str(dropout), 'code'])
+                          'g' + str(group_num), 'L' + str(num_layers), 'a' + str(alpha), 'T' + str(L_time), 'h' + str(hop_num), 'dp' + str(dropout), 'improve'])
     exp_name = para_name
 
     while os.path.exists('best_model/' + exp_name) and save:

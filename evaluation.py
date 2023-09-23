@@ -24,12 +24,13 @@ def evaluate(model, test_data, hidden_size, device, k=20):
     total_ndcg = 0.0
     total_hitrate = 0
 
-    for _, (users, items, _, short_cates, targets, mask) in enumerate(test_data):  # 一个batch的数据
+    for _, (users, items, _, short_cates, targets, mask, short_mask) in enumerate(test_data):  # 一个batch的数据
         user_embs = model(to_tensor(items, device), 
                           None,
                           to_tensor(short_cates, device),
                           None,
                           to_tensor(mask, device),
+                          to_tensor(short_mask, device),
                           train=False)
         user_embs = user_embs.cpu().detach().numpy()
 
